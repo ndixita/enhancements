@@ -17,7 +17,6 @@
   - [Components/Features changes](#componentsfeatures-changes)
     - [Cgroup Structure Remains unchanged](#cgroup-structure-remains-unchanged)
     - [PodSpec API changes](#podspec-api-changes)
-    - [PodStatus API changes](#podstatus-api-changes)
     - [PodSpec Validation Rules](#podspec-validation-rules)
       - [Proposed Validation &amp; Defaulting Rules](#proposed-validation--defaulting-rules)
       - [Comprehensive Tabular View](#comprehensive-tabular-view)
@@ -34,28 +33,21 @@
     - [Eviction Manager](#eviction-manager)
     - [Pod Overhead](#pod-overhead)
     - [Hugepages](#hugepages)
-    - [Memory Manager](#memory-manager)
-    - [In-Place Pod Resize](#in-place-pod-resize)
-      - [API changes](#api-changes)
-      - [Resize Restart Policy](#resize-restart-policy)
       - [Implementation Details](#implementation-details)
-    - [[Scopred for Beta] CPU Manager](#scopred-for-beta-cpu-manager)
-    - [[Scoped for Beta] Topology Manager](#scoped-for-beta-topology-manager)
-    - [[Scoped for Beta] User Experience Survey](#scoped-for-beta-user-experience-survey)
     - [[Scoped for Beta] Surfacing Pod Resource Requirements](#scoped-for-beta-surfacing-pod-resource-requirements)
       - [The Challenge of Determining Effective Pod Resource Requirements](#the-challenge-of-determining-effective-pod-resource-requirements)
       - [Goals of surfacing Pod Resource Requirements](#goals-of-surfacing-pod-resource-requirements)
       - [Implementation Details](#implementation-details-1)
       - [Notes for implementation](#notes-for-implementation)
-    - [[Scoped for Beta] VPA](#scoped-for-beta-vpa)
-    - [[Scoped for Beta] Cluster Autoscaler](#scoped-for-beta-cluster-autoscaler)
-    - [[Scoped for Beta] Support for Windows](#scoped-for-beta-support-for-windows)
+    - [[Scoped for Beta] HPA](#scoped-for-beta-hpa)
+    - [Cluster Autoscaler](#cluster-autoscaler)
+    - [VPA](#vpa)
   - [Test Plan](#test-plan)
     - [Unit tests](#unit-tests)
     - [e2e tests](#e2e-tests)
   - [Graduation Criteria](#graduation-criteria)
     - [Phase 1: Alpha (target 1.32)](#phase-1-alpha-target-132)
-    - [Phase 2:  Beta (target 1.33)](#phase-2--beta-target-133)
+    - [Phase 2:  Beta (target 1.34)](#phase-2--beta-target-134)
     - [GA (stable)](#ga-stable)
   - [Upgrade / Downgrade Strategy](#upgrade--downgrade-strategy)
       - [Upgrade](#upgrade)
@@ -71,7 +63,13 @@
 - [Implementation History](#implementation-history)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
-  - [VPA](#vpa)
+  - [VPA](#vpa-1)
+- [Future Work](#future-work)
+    - [[Future KEP Consideration in 1.35] Support for Windows](#future-kep-consideration-in-135-support-for-windows)
+    - [[Future KEP Consideration in 1.35] Memory Manager](#future-kep-consideration-in-135-memory-manager)
+    - [[Future KEP Consideration in 1.35] CPU Manager](#future-kep-consideration-in-135-cpu-manager)
+    - [[Future KEP Consideration in 1.35] Topology Manager](#future-kep-consideration-in-135-topology-manager)
+    - [[Scoped for GA] User Experience Survey](#scoped-for-ga-user-experience-survey)
 <!-- /toc -->
 
 
@@ -399,41 +397,6 @@ type PodSpec struct {
   Resources ResourceRequirements
 }
 ```
-
-#### PodStatus API changes
-
-Extend `PodStatus` to include pod-level analog of the container status resource
-fields. Pod-level resource information in `PodStatus` is essential for pod-level [In-Place Pod
-Update]
-(https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/1287-in-place-update-pod-resources/README.md#api-changes)
-as it provides a way to track, report and use the actual resource allocation for the
-pod, both before and after a resize operation.
-
-```
-type PodStatus struct {
-...
-  // Resources represents the compute resource requests and limits that have been
-  // applied at the pod level. If pod-level resources are not explicitly specified,
-  // then these will be the aggregate resources computed from containers. If limits are 
-  // not defined for all containers (and pod-level limits are also not set), those
-  // containers remain unrestricted, and no aggregate pod-level limits will be applied.  
-  // Pod-level limit aggregation is only performed, and is meaningful only, when all 
-  // containers have defined limits.
-  // +featureGate=InPlacePodVerticalScaling
-  // +featureGate=PodLevelResources
-  // +optional
-  Resources *ResourceRequirements
-
-  // AllocatedResources is the total requests allocated for this pod by the node.
-  // Kubelet sets this to the accepted requests when a pod (or resize) is admitted.
-  // If pod-level requests are not set, this will be the total requests aggregated
-  // across containers in the pod.
-  // +featureGate=InPlacePodVerticalScaling
-  // +featureGate=PodLevelResources
-  // +optional
-  AllocatedResources ResourceList
-}
-```
 #### PodSpec Validation Rules
 
 ##### Proposed Validation & Defaulting Rules
@@ -447,6 +410,14 @@ validation rules are proposed for pod-level resource specifications:
 * Pod-level Resources Priority: If pod-level requests and limits are explicitly
   set, they take precedence over container-level settings. Defaulting logic is only
   applied when pod-level requests and/or limits are not explicitly specified.
+
+* The aggregated container requests cannot be greater than pod-level
+  request or limit.
+
+* The aggregate container-level limits can exceed pod-level limits, but the total
+  resource consumption across all containers in a pod will always remain within
+  the pod-level limit. While the total container limits can exceed pod-level
+  requests or limits, no single container limit can exceed the pod-level limit.  
 
 * Container-level Defaulting: 
   * [Existing Rule] If the container-level request is not set, but the
@@ -468,14 +439,6 @@ validation rules are proposed for pod-level resource specifications:
     request from the container requests unless at least one container has a
     request defined. In this case, the pod-level request defaults to the
     pod-level limit.
-  
-* The aggregated container requests cannot be greater than pod-level
-  request or limit.
-
-* The aggregate container-level limits can exceed pod-level limits, but the total
-  resource consumption across all containers in a pod will always remain within
-  the pod-level limit. While the total container limits can exceed pod-level
-  requests or limits, no single container limit can exceed the pod-level limit.
  
 * **Supported Resources**: Currently, pod level resources support only CPU and
   memory.
@@ -1211,7 +1174,6 @@ back to aggregating container requests.
   set to accommodate both pod-level requests and pod overhead.
 
 #### Hugepages
-
 With the proposed changes, support for hugepages(with prefix hugepages-*) will be extended to the pod-level resources specifications, alongside CPU and memory. The hugetlb cgroup for the
 pod will then directly reflect the pod-level hugepage limits, if specified, rather than using an aggregated value from container limits. When scheduling, the scheduler will 
 consider hugepage requests at the pod level to find nodes with enough available
@@ -1219,319 +1181,82 @@ resources.
 
 Containers will still need to mount an emptyDir volume to access the huge page filesystem (typically /dev/hugepages).  This is the standard way for containers to interact with huge pages, and this will not change. 
 
-#### Memory Manager
-
-With the introduction of pod-level resource specifications, the Kubernetes Memory
-Manager will evolve to track and enforce resource limits at both the pod and
-container levels. It will need to aggregate memory usage across all containers
-within a pod to calculate the pod's total memory consumption. The Memory Manager
-will then enforce the pod-level limit as the hard cap for the entire pod's memory
-usage, preventing it from exceeding the allocated amount.  While still
-maintaining container-level limit enforcement, the Memory Manager will need to
-coordinate with the Kubelet and eviction manager to make decisions about pod
-eviction or individual container termination when the pod-level limit is
-breached.
-
-#### In-Place Pod Resize
-
-##### API changes
-
-IPPR for pod-level resources requires extending `PodStatus` to include pod-level
-resource fields as detailed in [PodStatus API changes](#### PodStatus API changes)
-section.
-
-##### Resize Restart Policy
-
-Pod-level resize policy is not supported in the alpha stage of Pod-level resource
-feature. While a pod-level resize policy might be beneficial for VM-based runtimes
-like Kata Containers (potentially allowing the hypervisor to restart the entire VM
-on resize), this is a topic for future consideration. We plan to engage with the
-Kata community to discuss this further and will re-evaluate the need for a pod-level
-policy in subsequent development stages.
-
-The absence of a pod-level resize policy means that container restarts are
-exclusively managed by their individual `resizePolicy` configs. The example below of
-a pod with pod-level resources demonstrates several key aspects of this behavior,
-showing how containers without explicit limits (which inherit pod-level limits) interact
-with resize policy, and how containers with specified resources remain unaffected by
-pod-level resizes.
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name:     pod-level-resources
-spec:
-  resources:
-    requests:
-      cpu: 100m
-      memory: 100Mi
-    limits:
-      cpu: 200m
-      memory: 200Mi
-  containers:
-    - name: c1
-      image: registry.k8s.io/pause:latest
-      resizePolicy:
-        - resourceName: "cpu"
-          restartPolicy: "NotRequired"
-        - resourceName: "memory"
-          restartPolicy: "RestartRequired"
-    - name: c2
-      image: registry.k8s.io/pause:latest
-      resources:
-        requests:
-          cpu: 50m
-          memory: 50Mi
-        limits:
-          cpu: 100m
-          memory: 100Mi
-      resizePolicy:
-        - resourceName: "cpu"
-          restartPolicy: "NotRequired"
-        - resourceName: "memory"
-          restartPolicy: "RestartRequired"
-```
-
-In this example:
-* CPU resizes: Neither container requires a restart for CPU resizes, and therefore CPU resizes at neither the container nor pod level will trigger any restarts.
-* Container c1 (inherited memory limit): c1 does not define any container level
-  resources, so the effective memory limit of the container is determined by the
-  pod-level limit. When the pod's limit is resized, c1's effective memory limit
-  changes. Because c1's memory resizePolicy is RestartRequired, a resize of the
-  pod-level memory limit will trigger a restart of container c1.
-* Container c2 (specified memory limit): c2 does define container-level resources,
-  so the effective memory limit of c2 is the container level limit. Therefore, a
-  resize of the pod-level memory limit doesn't change the effective container limit,
-  so the c2 is not restarted when the pod-level memory limit is resized.
-
 ##### Implementation Details
 
 ###### Allocating Pod-level Resources
-Allocation of pod-level resources will work the same as container-level resources. The allocated resources checkpoint will be extended to include pod-level resources, and the pod object will be updated with the allocated resources in the pod sync loop.
+Allocation of pod-level resources will work the same as container-level resources.
+The allocated resources checkpoint will be extended to include pod-level resources,
+and the pod object will be updated with the allocated resources in the pod sync
+loop.
 
-###### Actuating Pod-level Resource Resize
-The mechanism for actuating pod-level resize remains largely unchanged from the
-existing container-level resize process.  When pod-level resource configurations are
-applied, the system handles the resize in a similar manner as it does for
-container-level resources. This includes extending the existing logic to incorporate
-directly configured pod-level resource settings.
+#### [Scoped for Beta] HPA
+For accurate scaling decisions, HPA needs to be able to correctly calculate the
+resources requested by a pod, regardless of whether those requests are defined
+at the pod or container level. Currently, HPA calculates pod requests by simply
+aggregating the requests of all containers within a pod. To address this, HPA
+should leverage the helper method found at
+https://github.com/kubernetes/kubernetes/blob/988cf21f0975cf95444a619481c13d2503d8ec6a/staging/src/k8s.io/component-helpers/resource/helpers.go
+for more precise pod request computations. The changes are being worked on by
+sig-autoscaling: (#132237)[https://github.com/kubernetes/kubernetes/issues/132237]
 
-The same ordering rules for pod and container resource resizing will be applied for each
-resource as needed:
-1. Increase pod-level cgroup (if needed)
-2. Decrease container resources
-3. Decrease pod-level cgroup (if needed)
-4. Increase container resources
+To make HPA compatible with PodLevelResources, sig-autoscaling has proposed
+following changes:
 
-###### Tracking Actual Pod-level Resources
-To accurately track actual pod-level resources during in-place pod resizing, several
-changes are required that are analogous to the changes made for container-level
-in-place resizing:
+**For Resource type metrics**
 
-1. Configuration reading: Pod-level resource config is currently read as part of the
-   resize flow, but will also need to be read during pod creation. Critically, the
-   configuration must be read again after the resize operation to capture the
-   updated resource values. Currently, the configuration is only read before a
-   resize.
-   
-2. Pod Status Update: Because the pod status is updated before the resize takes
-   effect, the status will not immediately reflect the new resource values.  If a
-   container within the pod is also being resized, the container resize operation
-   will trigger a pod synchronization (pod-sync), which will refresh the pod's
-   status.  However, if only pod-level resources are being resized, a pod-sync must
-   be explicitly triggered to update the pod status with the new resource
-   allocation.
+* If pod-level requests are set: use pod level resources.
 
-3. [Scoped for Beta] Caching: Actual pod resource data may be cached to minimize API server load. This cache, if implemented, must be invalidated after each successful pod resize to ensure that subsequent reads retrieve the latest information. The need for and implementation of this caching mechanism will be evaluated in the beta phase.  Performance benchmarking will be conducted to determine if caching is required and, if so, what caching strategy is most appropriate.
+* If pod-level requests are not set or the PodLevelResources feature flag is not
+enabled (fallback to the current behavior): compute pod-level resources by
+aggregating container-level resources. Throw an error if at least one container in
+the pod doesn't set the resource requests.
 
-**Note for future enhancements for Ephemeral containers with pod-level resources and
-IPPR**
-Previously, assigning resources to ephemeral
-containers wasn't allowed because pod resource allocations were immutable. With
-the introduction of in-place pod resizing, users could gain more flexibility:
+**For ContainerResource type metrics**
 
-* Adjust pod-level resources to accommodate the needs of ephemeral containers. This
-allows for a more dynamic allocation of resources within the pod.
-* Specify resource requests and limits directly for ephemeral containers. Kubernetes will
-then automatically resize the pod to ensure sufficient resources are available
-for both regular and ephemeral containers.
+* Do not change the existing behavior: try to read the target container resource
+request (regardless if pod-level resources are set or not). If the container
+request is not set, throw an error.
 
-Currently, setting `resources` for ephemeral containers is disallowed as pod
-resource allocations were immutable before In-Place Pod Resizing feature. With
-in-place pod resize for pod-level resource allocation, users should be able to
-either modify the pod-level resources to accommodate ephemeral containers or
-supply resources at container-level for ephemeral containers and kubernetes will
-resize the pod to accommodate the ephemeral containers.
+Note that we are not changing HPA behavior with respect to ContainerResource type
+metrics, because the user should have control over per-container utilization if
+they specify container requests. An use case for that is: user specifies pod 
+requests and container request for only 1 container within that pod and configures
+HPA to scale based on that container's resource utilization.
 
-#### [Scopred for Beta] CPU Manager
+#### Cluster Autoscaler
 
-With the introduction of pod-level resource specifications, the CPU manager in
-Kubernetes will adapt to manage CPU requests and limits at the pod level rather
-than solely at the container level. This change means that the CPU manager will
-allocate and enforce CPU resources based on the total requirements of the entire
-pod, allowing for more flexible and efficient CPU utilization across all
-containers within a pod. The CPU manager will need to ensure that the aggregate
-CPU usage of all containers in a pod does not exceed the pod-level limits. 
+The Cluster Autoscaler uses resourcehelper.PodRequests to calculate Pod resource
+requirements for scaling decisions in K8s version 1.33. This automatically 
+includes Pod-level resource requests when the PodLevelResources feature gate is 
+enabled, ensuring accurate node scaling and utilization calculations.
 
-The CPU Manager policies are container-level configurations that control the 
-fine-grained allocation of CPU resources to containers.  While CPU manager 
-policies will operate within the constraints of pod-level resource limits, they 
-do not directly apply at the pod level.
+#### VPA
 
-#### [Scoped for Beta] Topology Manager
+Collaboration with sig-autoscaling has been established to integrate support for
+VPA with Pod-level resources, slated for VPA 1.5. The changes to support pod-level 
+resources in VPA will be worked on in two phases:
+* [Scoped for Beta] Phase 1 of Necessary changes
+  The necessary changes include augmenting the recommendation algorithm to
+  provide pod-level resource recommendations within RecommendedPodResources, in
+  addition to existing per-container recommendations, when pod-level resources are
+  set.
+  ```
+  type RecommendedPodResources struct {
+    ContainerRecommendations []RecommendedContainerResources
+    // NEW: Pod-level resources
+    PodLevelResources        *ResourceList
+  }
+  ```
+  Note: Detailed KEP design is owned and being worked on by 
+  sig-autoscaling: [#7571](https://github.com/kubernetes/autoscaler/issues/7571)
 
-Note: This section includes only high level overview; Design details will be added in Beta stage.
-
-* The pod level scope for topology aligntment will consider pod level requests and limits instead of container level aggregates.
-* The hint providers will consider pod level requests and limits instead of
-  container level aggregates.
-
-#### [Scoped for Beta] User Experience Survey
-
-Before promoting the feature to Beta, we plan to conduct a UX survey to
-understand user expectations for setting various combinations of requests and
-limits at both the pod and container levels. This will help us gather use cases
-for different combinations, enabling us to enhance the feature's usability.
-
-#### [Scoped for Beta] Surfacing Pod Resource Requirements
-
-##### The Challenge of Determining Effective Pod Resource Requirements
-
-Calculating the actual resource requirements of a pod can be quite complex. This
-is due to several factors:
-
-* Derived Pod Resources: Without Pod-level resources, the Pod-level resource
-  requirements are derived from container level specifications, involving a complex
-  formula (as described in [KEP#753](https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/753-sidecar-containers/README.md#resources-calculation-for-scheduling-and-pod-admission)) that considers init containers, sidecar containers, regular containers,
-  and Pod Overhead. 
-
-* Defaulting Logic: With Pod-level resources, Kubernetes will apply default
-  values for resource requests and limits when they are not explicitly
-  specified, further adding to the complexity of determining the final resource
-  requirements. 
-
-* In-Place Pod Updates: The ability to update the resource requirements without
-  restarting the pod
-  ([KEP#1287](https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/1287-in-place-update-pod-resources/README.md))
-  introduces another layer of complexity in calculating the effective resource
-  requirements.
-  
-  This inherent complexity makes it difficult for users to accurately determine
-  the total resources a pod needs. Various components, such as kube-scheduler,
-  kubelet, autoscalers, etc, rely on accurate information about a pod's resource
-  requirements to function correctly. Expecting users to perform these
-  calculations to understand their pod's resource usage and plan their cluster
-  capacity is unrealistic and cumbersome. 
-
-  To address this, this KEP proposes adding a new field called `DesiredResources`
-  to the Pod Status. This field will provide a clear and readily available
-  representation of the total resource requirements for a pending or scheduled
-  pod, simplifying resource understanding and capacity planning for users.
-
-##### Goals of surfacing Pod Resource Requirements
-
-* Allow Kubernetes users to quickly identify the effective resource requirements
-  for a pending or scheduled pod directly via observing the pod status.
-* Provide cluster autoscaler, karpenter etc with direct access resource
-  requirement information of unavailable/unschedulable pods, enabling
-  them to determine the necessary capacity and add nodes accordingly.
-* Allow consuming the Pod Requested Resources via metrics:
-  * Make sure kube_pod_resource_requests formula is up to date
-  * Consider exposing Pod Requirements as a Pod state metric via
-    https://github.com/kubernetes/kube-state-metrics/blob/main/docs/pod-metrics.md 
-* Provide a well documented, reusable, exported function to be used to calculate
-  the effective resource requirements for a v1.Pod struct.
-* Eliminate duplication of the pod resource requirement calculation within
-  `kubelet` and `kube-scheduler`.
-
-Note: in order to support the [Downgrade strategy](#downgrade-strategy), scheduler
-will ignore the presence of the `PodLevelResources` feature gate when calculating resources. This will
-prevent overbooking of nodes when scheduler ignored sidecar when calculating resources
-and scheduled too many Pods on the Node that had the `SidecarContainers` feature gate enabled.
-
-##### Implementation Details
-
-To effectively address the needs of both users and Kubernetes components that
-rely on accurate pod resource information, the proposed implementation involves
-two key changes:
-
-1. Add a field, `DesiredResources` to `PodStatus` to represent the effective
-resource requirements for the pod. This field allows users to inspect running and
-pending pods to quickly determine their effective resource requirements. 
-
-The field will be first populated by scheduler in the
-[updatePod](https://github.com/kubernetes/kubernetes/blob/815e651f397a6f5691efb26b0d4f3bddb034668c/pkg/scheduler/schedule_one.go#L943)
-method.
-
-It will then be updated in
-[generateAPIPodStatus](https://github.com/kubernetes/kubernetes/blob/a668924cb60901b413abc1fe7817bc7969167064/pkg/kubelet/kubelet_pods.go#L1459)
-method.
-
-```
-// TotalResourcesRequested is the effective resource requirements for this pod, taking into consideration init containers, sidecars, containers and pod overhead.
-// More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/  
-// +optional  
-DesiredResources ResourceRequirements `json:"desiredResources,omitempty" protobuf:"bytes,8,opt,name=desiredResources"`
-```
-
-2. Update the
-[PodRequestsAndLimitsReuse](https://github.com/kubernetes/kubernetes/blob/dfc9bf0953360201618ad52308ccb34fd8076dff/pkg/api/v1/resource/helpers.go#L64)
-function to support the new calculation and, if possible, re-use this
-functionality the other places that pod resource requests are needed (e.g.
-kube-scheduler, kubelet).  This ensures that components within Kubernetes have an
-identical computation for effective resource requirements and will reduce
-maintenance effort. Currently this function is only used for the metrics
-`kube_pod_resource_request` and `kube_pod_resource_limit` that are exposed by
-`kube-scheduler` which align with the values that will also now be reported on
-the pod status.
-
-A key advantage of having a well-defined, exported function for calculating pod
-resource requirements is that it can be used by various Kubernetes ecosystem
-components, even for pods that don't yet exist (pending pods). For example, an
-autoscaler needs to know what the resource requirements will be for DaemonSet
-pods when they are created to incorporate them into its calculations if it
-supports scale to zero.
-
-##### Notes for implementation
-
-This change could be made in a phased manner:
-* Refactor to use the `PodRequestsAndLimitsReuse` function in all situations
-  where pod resource requests are needed.
-* Add the new `DesiredResources` field on `PodStatus` and modify `kubelet` &
-  `kube-scheduler` to update the field.
-
-These two changes are independent of the sidecar and in-place resource update
-KEPs.  The first change doesn’t present any user visible change, and if
-implemented, will in a small way reduce the effort for both of those KEPs by
-providing a single place to update the pod resource calculation.
-
-#### [Scoped for Beta] VPA
-
-TBD. Do not review for the alpha stage.
-
-#### [Scoped for Beta] Cluster Autoscaler
-
-Cluster Autoscaler won't work as expected with pod-level resources in alpha since
-it relies on container-level values to be specified. If a user specifies only
-pod-level resources, the CA will assume that the pod requires no resources since
-container-level values are not set. As a result, the CA won't scale the number of
-nodes to accommodate this pod. Meanwhile, the scheduler will evaluate the
-pod-level resource requests but may be unable to find a suitable node to fit the
-pod. Consequently, the pod will not be scheduled. While this behavior is
-acceptable for the alpha implementation, it is anticipated that Cluster
-Autoscaler support will be addressed in the Beta phase with pod resource
-requirements surfaced in a helper library/function that autoscalers can use to
-make autoscaling decisions.
-
-#### [Scoped for Beta] Support for Windows
-
-Pod-level resource specifications are a natural extension of Kubernetes' existing
-resource management model. Although this new feature is expected to function with
-Windows containers, careful testing and consideration are required due to
-platform-specific differences. As the introduction of pod-level resources is a
-major change in itself, full support for Windows will be addressed in future
-stages, beyond the initial alpha release.
+* [Scoped for GA] Phase 2 of improving recommendation algorithm
+  Pod-Level Resources allows pod-level limits to be greater than aggregated
+  container limits to allow the containers to share idle resources among each other.
+  Integrating this functionality with VPA necessitates the development of a 
+  complex new recommendation algorithm. Concepts such as proportionate pod
+  and container level recommendations have been proposed and 
+  require further discussion.
 
 ### Test Plan
 
@@ -1576,7 +1301,7 @@ feature gate and by setting the new `resources` fields in PodSpec at Pod level.
 * Documentation mentioning high level design.
 
 
-#### Phase 2:  Beta (target 1.33)
+#### Phase 2:  Beta (target 1.34)
 
 
 * User Feedback.
@@ -1585,9 +1310,12 @@ feature gate and by setting the new `resources` fields in PodSpec at Pod level.
 * Unit test coverage for additional features supported in Beta.
 * E2E tests for additional features supported in Beta.
 * Documentation update and blog post to announce feature in beta phase.
-* [Tentative] Benchmark tests for resource usage with and without pod level resources for bursty workloads.
+* Benchmark tests for resource usage with and without pod level resources for bursty workloads.
   * Use kube_pod_container_resource_usage metric to check resource utilization.
-* [TBD] In-place pod resize support either as a part of this KEP or a separate KEP/feature.
+* In-place pod resize support guarded behind a separate feature gate -
+  `InPlacePodLevelResourcesVerticalScaling`
+* Suggest Karpenter folks to use pod resource requests from k8s.io/component-helper
+  or update https://github.com/kubernetes-sigs/karpenter/blob/v1.5.0/pkg/utils/resources/resources.go#L111-L144
 
 #### GA (stable)
 
@@ -2067,15 +1795,17 @@ For each of them, fill in the following information by copying the below templat
 ###### What steps should be taken if SLOs are not being met to determine the problem?
 
 It is suggested that if workloads with pod level resource specifications enabled cause performance 
-or stability degradations, those workloads are recrated with only container level resource specs.
+or stability degradations, those workloads are recrated with only container level
+resource specs.
 
 ## Implementation History
 
 - **2020-03-17:** Initial discussion in [SIG Node meeting] (https://www.youtube.com/watch?v=3cU56ZiUZ8w&list=PL69nYSiGNLP1wJPj5DYWXjiArF-MJ5fNG&index=101)
 - **2020-03-30:** Initial [KEP draft](https://github.com/kubernetes/enhancements/pull/1592) and discussion.
 - **2021-07-26:** Issue [link](https://github.com/kubernetes/enhancements/issues/2837)
-- **2024-05-31:** Revised KEP for alpha (#4678)[https://github.com/kubernetes/enhancements/pull/4678]
-
+- **2024-05-31:** Revised KEP for alpha
+  (#4678)[https://github.com/kubernetes/enhancements/pull/4678]
+- **2025-06-18:** Revised KEP for Beta
 
 ## Drawbacks
 
@@ -2101,3 +1831,129 @@ What other approaches did you consider, and why did you rule them out? These do
 not need to be as detailed as the proposal, but should include enough
 information to express the idea and why it was not acceptable.
 -->
+
+## Future Work
+
+#### [Future KEP Consideration in 1.35] Support for Windows
+
+Please note: This will be a separate KEP feature guarded by a feature gate.
+
+Pod-level resource specifications are a natural extension of Kubernetes' existing
+resource management model. Although this new feature is expected to function with
+Windows containers, careful testing and consideration are required due to
+platform-specific differences. As the introduction of pod-level resources is a
+major change in itself, full support for Windows will be addressed in future
+KEPs, beyond the scope of this KEP.
+
+Until full Windows support for pod-level resource specifications is implemented,
+the behavior for pods, with pod-level resources, targeting Windows is as follows:
+
+* API Server Validation: If the spec.os.name field in the Pod specification is 
+explicitly set to "windows", the Kubernetes API server will generally reject 
+the pod during validation.
+
+* Kubelet Admission: The Kubelet running on a Windows node would reject the pod,
+  with pod-level resources, during admission.
+
+#### [Future KEP Consideration in 1.35] Memory Manager
+Please note: This will be a separate feature, as the required changes are
+not trivial and warrant further discussion. Until full support for the pod-level
+resources with Memory Manager is implemented, any pod, with pod-level resources,
+would be rejected during Kubelet admission.
+
+The Memory Manager currently allocates memory resources at
+the container level through its
+[Allocate](https://github.com/kubernetes/kubernetes/blob/849a82b727b1cc1e77b58149b3cacbfa5ada30fd/pkg/kubelet/cm/memorymanager/memory_manager.go#L261)
+method. The [Topology Manager](https://github.com/kubernetes/kubernetes/blob/fd53f7292c7d5899135fddd928c0dc3844126820/pkg/kubelet/cm/topologymanager/scope.go#L150) calls this Allocate method as part of its hint provider integration.
+
+With the introduction of Pod Level Resources, the following modifications are needed:
+
+1. Memory Manager Interface Extension:
+Add a new AllocatePodLevel method to the Memory Manager interface to handle 
+resource allocation at the pod level. This method will complement the existing container-level Allocate method.
+
+2. Topology Manager Integration: Modify the (Topology Manager)[https://github.com/kubernetes/kubernetes/blob/fd53f7292c7d5899135fddd928c0dc3844126820/pkg/kubelet/cm/topologymanager/scope.go#L150] to conditionally
+call AllocatePodLevel when pod-level resources are configured. Maintain
+backward compatibility by continuing to use the existing Allocate method for
+container-level allocation scenarios
+
+#### [Future KEP Consideration in 1.35] CPU Manager
+Please note: This will be a separate feature, as the required changes are
+not trivial and warrant further discussion. Until full support for the pod-level
+resources with CPU Manager is implemented, any pod, with pod-level resources,
+would be rejected during Kubelet admission.
+
+The CPU Manager currently allocates CPUs at
+the container level through its
+[Allocate](https://github.com/kubernetes/kubernetes/blob/fd53f7292c7d5899135fddd928c0dc3844126820/pkg/kubelet/cm/cpumanager/cpu_manager.go#L255)
+method. The [Topology Manager](https://github.com/kubernetes/kubernetes/blob/fd53f7292c7d5899135fddd928c0dc3844126820/pkg/kubelet/cm/topologymanager/scope.go#L150) calls this Allocate method as part of its hint provider integration.
+
+With the introduction of Pod Level Resources, the following modifications are required:
+
+1. CPU Manager Interface Extension: Add a new AllocatePodLevel method to the CPU
+Manager interface to handle resource allocation at the pod level. This method
+will complement the existing container-level Allocate method.
+
+2. Topology Manager Integration: Modify the (Topology
+Manager)[https://github.com/kubernetes/kubernetes/blob/fd53f7292c7d5899135fddd928c0dc3844126820/pkg/kubelet/cm/topologymanager/scope.go#L150]
+to conditionally call AllocatePodLevel when pod-level resources are
+configured. Backward compatibility will be maintained by continuing to use the
+existing Allocate method for container-level allocation scenarios.
+
+3. Policy-Specific Modifications: Not all existing CPU Manager policies remain
+   compatible with Pod Level Resources. Following are policy-specific
+   adaptations:
+   
+* distribute-cpus-across-numa: This policy is incompatible with pod-level
+  resources. Distributing CPUs across NUMA nodes requires detailed knowledge of
+  bandwidth-intensive containers, which is explicitly abstracted away by
+  pod-level resources. Without workload-specific information, the system cannot
+  optimally distribute containers across NUMA nodes, and incorrect placement
+  could degrade performance (How to distribute M containers across N NUMA
+  nodes).
+
+* distribute-cpus-across-cores: Similarly, this policy is incompatible. Users focused on core-level optimization for individual containers would likely not opt for pod-level resources in the first place.
+
+* full-pcpus-only: This policy is compatible and highly beneficial for multi-tenant pods requiring inter-pod isolation, as it helps prevent hyperthread contention. The CPU Manager will be extended to allocate full physical cores at the pod level and implement a shared CPU pool within pod boundaries.
+
+* align-by-socket: This policy is compatible. It ensures all a pod's CPUs remain on the same socket when possible, reducing inter-socket latencies and benefiting containers that share L3 cache or communicate frequently. The socket alignment logic will be extended to work with pod-level CPU pools.
+
+* strict-cpu-reservation: This policy is compatible and crucial for guaranteed workloads, preventing interference from burstable and best-effort pods. We'll update the CPU reservation logic to consider pod-level requests and limits.
+
+* prefer-align-cpus-by-uncorecache: This policy is compatible. It optimizes CPU allocation across uncore cache groups, enhancing shared cache locality for containers within the pod. The allocation logic will be updated to consider pod-level requests and limits.
+
+Note: This is a preliminary analysis, and we might have real usecases to support
+  distribute-cpus-across-numa and distribute-cpus-across-cores with pod-level
+  resources. We can re-visit this again during the GA planning cycle.
+
+#### [Future KEP Consideration in 1.35] Topology Manager
+Please note: This will be a separate feature, as the required changes are
+not trivial and warrant further discussion. Until full support for the pod-level
+resources with Topology Manager is implemented, any pod, with pod-level resources,
+would be rejected during Kubelet admission.
+
+Currently, scope=pod aggregates resource requirements from a pod's individual
+containers to determine overall pod-level needs. With the introduction of Pod
+Level Resources, scope=pod will directly use the pod-level resource values
+specified in the Pod object for topology alignment.
+
+Besides, scope=container won't be supported for pods with Pod Level Resources. This
+is because these pods lack per-container resource specifications, leaving the
+Topology Manager without the granular information needed to make informed
+container-level topology decisions. If a user creates a pod with pod-level 
+resources and this pod gets scheduled on a node where the Kubelet's Topology Manager
+is configured with scope=container, then the Topology Manager will not perform
+resource alignment for that pod, and will explicitly throw an error with an
+informative message.This message will guide the user to use scope=pod or to
+configure per-container resources if fine-grained container-level topology
+is truly desired.
+
+#### [Scoped for GA] User Experience Survey
+
+Before promoting the feature to GA, we plan to conduct a UX survey to
+understand user expectations for setting various combinations of requests and
+limits at both the pod and container levels. This will help us gather use cases
+for different combinations, enabling us to enhance the feature's usability. If we
+identify the need for significant changes to the defaulting logic based on this 
+feedback, we'll release another Beta version of Pod-Level Resources to
+incorporate those adjustments.
